@@ -1,0 +1,202 @@
+proc import datafile="C:\Users\RLEDDY\Desktop\accepted_2007_to_2018Q4.csv"
+    out=work.accepted_loans
+    dbms=csv
+    replace;
+    guessingrows=MAX;
+run;
+
+proc contents data=work.accepted_loans;
+    title 'Data Structure of Lending Club Dataset';
+run;
+
+proc print data=work.accepted_loans(obs=5);
+    title 'First 5 Observations of Raw Data';
+run;
+
+data work.analysis_data;
+    set work.accepted_loans;
+    if loan_status in ('Charged Off', 'Default') then default_flag = 1;
+    else if loan_status in ('Fully Paid', 'Current') then default_flag = 0;
+    else delete;
+    keep annual_inc int_rate dti fico_range_low delinq_2yrs revol_util 
+         inq_last_6mths mths_since_last_delinq loan_amnt emp_length 
+         loan_status default_flag;
+run;
+
+proc surveyselect data=work.analysis_data out=work.analysis_data_sample
+    method=srs n=50000 seed=12345;
+run;
+
+data work.analysis_data;
+    set work.analysis_data_sample;
+    drop SelectionProb SamplingWeight;
+run;
+
+proc means data=work.analysis_data n mean std min max;
+    var annual_inc int_rate dti fico_range_low delinq_2yrs revol_util 
+        inq_last_6mths mths_since_last_delinq loan_amnt ;
+    title 'Summary Statistics for Lending Club Variables (Sample N=50,000)';
+run;
+
+proc univariate data=work.analysis_data;
+    var annual_inc int_rate dti fico_range_low loan_amnt;
+    histogram / normal;
+    title 'Univariate Analysis of Key Variables (Cleaned Data)';
+run;
+
+
+proc summary data=work.analysis_data;
+    class default_flag;
+    var annual_inc int_rate dti fico_range_low delinq_2yrs revol_util 
+        inq_last_6mths mths_since_last_delinq loan_amnt ;
+    output out=work.summary_by_default mean= std= / autoname;
+run;
+
+proc print data=work.summary_by_default;
+	title 'Summary Statistics by Default Status (Sample N=50,000)';
+run;
+
+proc corr data=work.analysis_data;
+    var annual_inc int_rate dti fico_range_low delinq_2yrs revol_util 
+        inq_last_6mths mths_since_last_delinq loan_amnt emp_length default_flag;
+    title 'Correlation Matrix (Cleaned Data)';
+run;
+
+/* VISUALIZATION */
+
+data work.analysis_viz;
+    set work.analysis_data;
+    if default_flag = 1 then default_status = 'Default';
+    else if default_flag = 0 then default_status = 'Non-Default';
+    else delete;
+run;
+
+proc sgplot data=work.analysis_data;
+    vbox int_rate / category=default_flag;
+    title 'Interest Rate Distribution by Default Status (Sample N=50,000)';
+run;
+
+proc sgplot data=work.analysis_data;
+    vbox fico_range_low / category=default_flag;
+    title 'FICO Score Distribution by Default Status (Sample N=50,000)';
+run;
+
+proc anova data=work.analysis_data;
+    class default_flag;
+    model int_rate = default_flag;
+    title 'ANOVA: Interest Rate by Default Status (Sample N=50,000)';
+run;
+
+proc anova data=work.analysis_data;
+    class default_flag;
+    model dti = default_flag;
+    title 'ANOVA: DTI by Default Status (Sample N=50,000)';
+run;
+
+proc anova data=work.analysis_data;
+    class default_flag;
+    model annual_inc = default_flag;
+    title 'ANOVA: Annual Income by Default Status (Sample N=50,000)';
+run;
+
+proc standard data=work.analysis_data mean=0 std=1 out=work.std_data;
+    var annual_inc int_rate dti fico_range_low delinq_2yrs revol_util 
+        inq_last_6mths mths_since_last_delinq loan_amnt ;
+run;
+
+/* K-means clustering */
+proc fastclus data=work.std_data out=work.kmeans_out maxclusters=3 maxiter=50;
+    var annual_inc int_rate dti fico_range_low delinq_2yrs revol_util 
+        inq_last_6mths mths_since_last_delinq loan_amnt ;
+    title 'K-Means Clustering (3 clusters) - Sample N=50,000';
+run;
+
+/* Hierarchical clustering */
+proc surveyselect data=work.std_data out=work.std_data_hclust
+    method=srs n=5000 seed=54321;
+run;
+
+
+data work.std_data_hclust;
+    set work.std_data_hclust;
+    drop SelectionProb SamplingWeight;
+run;
+
+proc cluster data=work.std_data_hclust method=ward outtree=work.tree_out
+    ccc pseudo;
+    var annual_inc int_rate dti fico_range_low delinq_2yrs revol_util 
+        inq_last_6mths mths_since_last_delinq loan_amnt ;
+    title 'Hierarchical Clustering - Sample N=5,000 (for computational efficiency)';
+run;
+
+/* Clusters from tree */
+proc tree data=work.tree_out out=work.clsout ncl=3 noprint;
+    copy annual_inc int_rate dti fico_range_low delinq_2yrs revol_util 
+         inq_last_6mths mths_since_last_delinq loan_amnt ;
+run;
+
+
+data work.analysis_data_numbered;
+    set work.analysis_data;
+    row_num = _n_;
+run;
+
+data work.kmeans_out_numbered;
+    set work.kmeans_out;
+    row_num = _n_;
+run;
+
+proc sql;
+    create table work.final_analysis as
+    select a.*, k.cluster as kmeans_cluster
+    from work.analysis_data_numbered a
+    left join work.kmeans_out_numbered k
+    on a.row_num = k.row_num;
+quit;
+
+/* K-means cluster means */
+proc means data=work.final_analysis;
+    class kmeans_cluster;
+    var annual_inc int_rate dti fico_range_low delinq_2yrs revol_util 
+        inq_last_6mths mths_since_last_delinq loan_amnt default_flag;
+    title 'K-Means Cluster Profiles (Sample N=50,000)';
+run;
+
+/* Regression for K-means Cluster 1 */
+proc logistic data=work.final_analysis;
+    where kmeans_cluster = 1;
+    model default_flag(event='1') = annual_inc int_rate dti fico_range_low 
+          delinq_2yrs revol_util inq_last_6mths mths_since_last_delinq 
+          loan_amnt ;
+    title 'Logistic Regression - K-Means Cluster 1 (Sample N=50,000)';
+run;
+
+/* Regression for K-means Cluster 2 */
+proc logistic data=work.final_analysis;
+    where kmeans_cluster = 2;
+    model default_flag(event='1') = annual_inc int_rate dti fico_range_low 
+          delinq_2yrs revol_util inq_last_6mths mths_since_last_delinq 
+          loan_amnt ;
+    title 'Logistic Regression - K-Means Cluster 2 (Sample N=50,000)';
+run;
+
+/* Regression for K-means Cluster 3 */
+proc logistic data=work.final_analysis;
+    where kmeans_cluster = 3;
+    model default_flag(event='1') = annual_inc int_rate dti fico_range_low 
+          delinq_2yrs revol_util inq_last_6mths mths_since_last_delinq 
+          loan_amnt ;
+    title 'Logistic Regression - K-Means Cluster 3 (Sample N=50,000)';
+run;
+
+/* Chi-square test for cluster differences in default rates */
+proc freq data=work.final_analysis;
+    tables kmeans_cluster*default_flag / chisq;
+    title 'Chi-Square Test: K-Means Clusters vs Default Rate (Sample N=50,000)';
+run;
+
+/* Default rates by cluster */
+proc freq data=work.final_analysis;
+    tables kmeans_cluster*default_flag / nocol nopercent;
+    title 'Default Rates by K-Means Cluster (Sample N=50,000)';
+run;
