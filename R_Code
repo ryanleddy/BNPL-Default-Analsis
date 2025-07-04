@@ -1,0 +1,196 @@
+library(data.table)
+library(randomForest)
+library(fastDummies)
+library(neuralnet)
+library(pROC)
+library(R.utils)
+source("http://bigblue.depaul.edu/jlee141/econdata/R/func_lib.R")
+
+file_path <- "~/Downloads/archive/accepted_2007_to_2018Q4.csv.gz"
+loan_data_accepted <- fread(file_path)
+loan_data <- loan_data_accepted
+
+str(loan_data)
+
+loan_data$default <- ifelse(loan_data$loan_status == "Charged Off", 1, 0)
+table(loan_data$default)
+
+complete_vars <- c("default", "annual_inc", "int_rate", "dti", "fico_range_low", "delinq_2yrs", "revol_util", "inq_last_6mths", "mths_since_last_delinq", "loan_amnt", "emp_length")
+
+loan_data_clean <- loan_data[complete.cases(loan_data[, ..complete_vars])]
+
+set.seed(2084213)
+smaller_sample_size <- min(50000, nrow(loan_data_clean))
+smaller_idx <- sample(nrow(loan_data_clean), smaller_sample_size)
+loan_data_smaller <- loan_data_clean[smaller_idx, ]
+
+train_idx <- sample(nrow(loan_data_smaller), round(0.7 * nrow(loan_data_smaller)))
+train <- loan_data_smaller[train_idx, ]
+test <- loan_data_smaller[-train_idx, ]
+test_y <- test$default
+
+#==
+# Linear Regression 
+#==
+
+# LPM 1
+lpm1 <- lm(default ~ annual_inc, data=train)
+summary(lpm1)
+yhat_lpm1 <- predict(lpm1, newdata=test)
+
+# LPM 2
+lpm2 <- lm(default ~ annual_inc + int_rate + dti, data=train)
+summary(lpm2)
+yhat_lpm2 <- predict(lpm2, newdata=test)
+
+# LPM 3
+lpm3 <- lm(default ~ annual_inc + int_rate + dti + fico_range_low + delinq_2yrs + revol_util + inq_last_6mths + mths_since_last_delinq + loan_amnt + emp_length, data=train)
+summary(lpm3)
+yhat_lpm3 <- predict(lpm3, newdata=test)
+
+# LPM 4
+lpm4 <- step(lpm3, direction = "both", trace = 0)
+summary(lpm4)
+yhat_lpm4 <- predict(lpm4, newdata = test)
+
+
+# Model evaluation
+e1 <- test_y - yhat_lpm1
+e2 <- test_y - yhat_lpm2
+e3 <- test_y - yhat_lpm3
+e4 <- test_y - yhat_lpm4
+
+RMSE1 <- sqrt(mean(e1^2))
+RMSE2 <- sqrt(mean(e2^2))
+RMSE3 <- sqrt(mean(e3^2))
+RMSE4 <- sqrt(mean(e4^2))
+cbind(RMSE1, RMSE2, RMSE3, RMSE4)
+
+# AUC plots for LPM models
+dev.new(width = 12, height = 8)
+par(mfrow = c(2, 2), mar = c(4, 4, 2, 1))
+auc_plot(yhat_lpm1, test_y, "LPM Model 1")
+auc_plot(yhat_lpm2, test_y, "LPM Model 2")
+auc_plot(yhat_lpm3, test_y, "LPM Model 3")
+auc_plot(yhat_lpm4, test_y, "LPM Model 4")
+dev.off()
+
+# Confusion tables for LPM models
+conf_table(yhat_lpm1, test_y, "LPM Model 1")
+conf_table(yhat_lpm2, test_y, "LPM Model 2")
+
+#==
+# LOGISTIC REGRESSION MODELS
+#==
+
+# LRM 1 - All variables
+logit1 <- glm(default ~ annual_inc + int_rate + dti + fico_range_low + delinq_2yrs + revol_util + inq_last_6mths + mths_since_last_delinq + loan_amnt + emp_length, data=train, family=binomial(link=logit))
+summary(logit1)
+yhat_logit1 <- predict(logit1, newdata=test, type="response")
+auc_plot(yhat_logit1, test_y, "Logistic Regression")
+conf_table(yhat_logit1, test_y, "Logistic Regression")
+
+# LRM 2 - Selected variables
+logit2 <- step(glm(default ~ annual_inc + int_rate + dti, data=train, family=binomial(link=logit)))
+summary(logit2)
+yhat_logit2 <- predict(logit2, newdata=test, type="response")
+par(mfrow = c(1, 1))
+auc_plot(yhat_logit2, test_y, "Logistic Regression 2")
+
+# Decision thresholds and confusion matrices
+dec_logit1 <- ifelse(yhat_logit1 > .2, 1, 0)
+table(test_y, dec_logit1)
+
+dec_logit2 <- ifelse(yhat_logit2 > .2, 1, 0)
+table(test_y, dec_logit2)
+
+# RANDOM FOREST MODEL
+
+train1 <- train
+train1$default <- as.factor(train1$default)
+rf1 <- randomForest(default ~ annual_inc + int_rate + dti + fico_range_low + delinq_2yrs + revol_util + inq_last_6mths + mths_since_last_delinq + loan_amnt + emp_length,mtry=5, ntree=200, data=train1)
+summary(rf1)
+yhat_rf <- predict(rf1,newdata=test,type="prob")
+yhat_rf <- yhat_rf[,2]
+auc_plot(yhat_rf,test_y,"Random Forest")
+
+# Optimal mtry
+oob.values <- vector(length = 1)
+for(i in 1:10){
+  temp.model <- randomForest(default ~ annual_inc + int_rate + dti + fico_range_low + delinq_2yrs + revol_util + inq_last_6mths + mths_since_last_delinq + loan_amnt + emp_length, mtry= i, ntree = 200, data=train1)
+  oob.values[i] <- temp.model$err.rate[nrow(temp.model$err.rate),1]  
+}
+cbind(1:10,oob.values)
+
+temp.model <- randomForest(default ~ annual_inc + int_rate + dti + fico_range_low + delinq_2yrs + revol_util + inq_last_6mths + mths_since_last_delinq + loan_amnt + emp_length, mtry= 3, ntree = 400, data=train1)
+Trees = rep(1:nrow(temp.model$err.rate))
+Error.rate = temp.model$err.rate[,"OOB"]
+plot(Trees,Error.rate, col="red")
+
+rf2 <- randomForest(default ~ annual_inc + int_rate + dti + fico_range_low + delinq_2yrs + revol_util + inq_last_6mths + mths_since_last_delinq + loan_amnt + emp_length, mtry= 3, ntree = 100, data=train1)
+summary(rf2)
+yhat_rf2 <- predict(rf2,newdata=test,type="prob")
+yhat_rf2 <- yhat_rf2[,2]
+auc_plot(yhat_rf2,test_y,"Random Forest")
+
+par(mfrow=c(2,2))
+auc_plot(yhat_lpm3,test_y,"LPM Model")
+auc_plot(yhat_logit1,test_y,"Logistic Regression")
+auc_plot(yhat_rf,test_y,"Random Forest")
+auc_plot(yhat_rf2,test_y,"Random Forest")
+
+library(pROC)
+library(randomForest)
+
+auc_score <- 0
+best_auc <- 0
+iter <- 0
+best_rf <- 0 
+n_iter = 100
+auc_score_hist <- matrix(0,n_iter,2) 
+
+
+for (iter in 1: n_iter) { 
+  rf1 <- randomForest(default ~ annual_inc + int_rate + dti + fico_range_low + delinq_2yrs + revol_util + inq_last_6mths + mths_since_last_delinq + loan_amnt + emp_length, data = train1, mtry = 3, ntree = 100)
+  yhat_rf <- predict(rf1, newdata = test, type = "prob")[, 2]
+  roc_obj <- roc(test_y, yhat_rf)
+  auc_score <- auc(roc_obj)
+  auc_score_hist[iter,1] <- iter
+  auc_score_hist[iter,2] <- auc_score
+  # Update the best AUC and random forest model
+  if (auc_score > best_auc) {
+    best_auc <- auc_score
+    best_rf  <- rf1  
+  }
+  
+  cat("Iteration:", iter, 
+      "- Current AUC:", round(auc_score, 4), 
+      "- Best AUC so far:", round(best_auc, 4), "\n")
+}
+
+# Final AUC plot
+auc_plot(yhat_rf, test_y, "Random Forest")
+hist(auc_score_hist[,2])
+
+
+summary(train)
+
+indata <- as.data.frame(train) 
+indata <- dummy_cols(indata,
+                     select_columns=c("emp_length"),
+                     remove_selected_columns = TRUE)
+summary(indata)
+
+set.seed(1234)
+indata$default <- as.factor(indata$default)
+train_idx <- sample(nrow(indata),round(0.8*nrow(indata)))
+ztrain <- indata[train_idx,]
+ztest  <- indata[-train_idx,]
+testy <- ztest$default
+
+library(neuralnet)
+nn1 <- neuralnet(default~annual_inc + int_rate + dti + fico_range_low + delinq_2yrs + revol_util + inq_last_6mths + mths_since_last_delinq + loan_amnt, data=ztrain, linear.output = FALSE, hidden = c(5))
+summary(nn1)
+plot(nn1)
+yhat_nn1 <- predict(nn1, newdata=ztest)
+yhat_nn1 <- yhat_nn1[,2]
